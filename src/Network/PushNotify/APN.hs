@@ -508,7 +508,7 @@ newConnection aci = do
           castore <- getSystemCertificateStore
           let clip = ClientParams
                   { clientUseMaxFragmentLength=Nothing
-                  , clientServerIdentification=(T.unpack hostname, undefined)
+                  , clientServerIdentification=(T.unpack hostname, "")
                   , clientUseServerNameIndication=True
                   , clientWantSessionResume=Nothing
                   , clientShared=def
@@ -535,7 +535,7 @@ newConnection aci = do
 
               clip = ClientParams
                   { clientUseMaxFragmentLength=Nothing
-                  , clientServerIdentification=(T.unpack hostname, undefined)
+                  , clientServerIdentification=(T.unpack hostname, "")
                   , clientUseServerNameIndication=True
                   , clientWantSessionResume=Nothing
                   , clientShared=shared
