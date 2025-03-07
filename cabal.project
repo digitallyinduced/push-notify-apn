@@ -1,0 +1,5 @@
+packages: .
+source-repository-package
+    type: git
+    location: https://github.com/9999years/http2-client.git
+    tag: 0bc684b37e4b99abe568433e1b2239cc5c365de2
