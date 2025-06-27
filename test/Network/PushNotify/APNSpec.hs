@@ -18,6 +18,7 @@ spec = do
             "badge"    .= Null,
             "mutable-content" .= Null,
             "interruption-level" .= Null,
+            "content-changed" .= Null,
             "alert"    .= object [
               "title" .= String "hello",
               "body"  .= String "world"
@@ -31,6 +32,7 @@ spec = do
             "badge"    .= Null,
             "mutable-content" .= Null,
             "interruption-level" .= Null,
+            "content-changed" .= Null,
             "alert"    .= object [
               "title" .= String "hello",
               "subtitle" .= String "there",
@@ -45,6 +47,7 @@ spec = do
             "badge"    .= Null,
             "mutable-content" .= Null,
             "interruption-level" .= Null,
+            "content-changed" .= Null,
             "alert"    .= object [ "body"  .= String "hello world" ]
           ]
 
@@ -80,5 +83,51 @@ spec = do
     context "JSON decoder" $
       it "decodes the error correctly" $
         eitherDecode "\"TooManyProviderTokenUpdates\"" `shouldBe` Right ApnTemporaryErrorTooManyProviderTokenUpdates
+
+  describe "Widget notifications" $
+    context "JSON encoder" $ do
+      it "encodes widget message with content-changed flag" $
+        let (JsonAps widgetMsg _ _) = newWidgetMessage
+        in toJSON widgetMsg `shouldBe`
+          object [
+            "category" .= Null,
+            "sound"    .= Null,
+            "badge"    .= Null,
+            "mutable-content" .= Null,
+            "interruption-level" .= Null,
+            "content-changed" .= Bool True,
+            "alert"    .= Null
+          ]
+      
+      it "encodes complete widget message" $
+        toJSON newWidgetMessage `shouldBe` object [
+          "aps" .= object [
+            "category" .= Null,
+            "sound"    .= Null,
+            "badge"    .= Null,
+            "mutable-content" .= Null,
+            "interruption-level" .= Null,
+            "content-changed" .= Bool True,
+            "alert"    .= Null
+          ],
+          "appspecificcontent" .= Null,
+          "data" .= object []
+        ]
+
+  describe "ApnPushType" $ do
+    context "JSON encoder" $ do
+      it "encodes alert push type" $
+        toJSON ApnPushTypeAlert `shouldBe` String "alert"
+      it "encodes background push type" $
+        toJSON ApnPushTypeBackground `shouldBe` String "background"
+      it "encodes widgets push type" $
+        toJSON ApnPushTypeWidgets `shouldBe` String "widgets"
+    context "JSON decoder" $ do
+      it "decodes alert push type" $
+        eitherDecode "\"alert\"" `shouldBe` Right ApnPushTypeAlert
+      it "decodes background push type" $
+        eitherDecode "\"background\"" `shouldBe` Right ApnPushTypeBackground
+      it "decodes widgets push type" $
+        eitherDecode "\"widgets\"" `shouldBe` Right ApnPushTypeWidgets
   where
     (&) = flip ($)
