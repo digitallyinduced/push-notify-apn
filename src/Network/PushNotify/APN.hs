@@ -59,8 +59,10 @@ module Network.PushNotify.APN
     , ApnToken(..)
     , InterruptionLevel(..)
     , ApnPushType(..)
+    , ApnPriority(..)
     ) where
 
+import           Control.Applicative
 import           Control.Concurrent
 import           Control.Exception.Lifted (Exception, try, bracket_, throw, throwIO)
 import           Control.Monad
@@ -212,6 +214,19 @@ data ApnPushType = ApnPushTypeAlert
                  | ApnPushTypeBackground
                  | ApnPushTypeWidgets
                  deriving (Enum, Eq, Show, Generic)
+
+-- | The priority of the notification (for HTTP/2 apns-priority header).
+data ApnPriority = ApnPriorityImmediate    -- ^ 10: Send immediately, triggers alerts/sounds/badges
+                 | ApnPriorityPowerEfficient -- ^ 5: Send based on power considerations, required for background notifications
+                 | ApnPriorityLow          -- ^ 1: Prioritize device power over delivery
+                 deriving (Enum, Eq, Show, Generic)
+
+-- | Get the default priority for a push type according to APNS spec
+-- Returns Nothing for widgets (no priority header should be sent)
+defaultPriorityForPushType :: ApnPushType -> Maybe ApnPriority
+defaultPriorityForPushType ApnPushTypeBackground = Just ApnPriorityPowerEfficient  -- Required by spec
+defaultPriorityForPushType ApnPushTypeAlert = Just ApnPriorityImmediate
+defaultPriorityForPushType ApnPushTypeWidgets = Nothing  -- No priority header for widgets
 
 instance ToJSON ApnPushType where
     toJSON ApnPushTypeAlert = String "alert"
@@ -703,13 +718,15 @@ sendRawMessage
     -- ^ Device to send the message to
     -> Maybe ByteString
     -- ^ JWT Bearer Token
+    -> Maybe ApnPriority
+    -- ^ Priority (Nothing uses default)
     -> ByteString
     -- ^ The message to send
     -> IO ApnMessageResult
     -- ^ The response from the APN server
-sendRawMessage s deviceToken mJwtToken payload = catchErrors $
+sendRawMessage s deviceToken mJwtToken mPriority payload = catchErrors $
     withConnection s $ \c ->
-        sendApnRaw c deviceToken mJwtToken ApnPushTypeAlert payload
+        sendApnRaw c deviceToken mJwtToken ApnPushTypeAlert mPriority payload
 
 -- | Send a push notification message.
 sendMessage
@@ -719,16 +736,19 @@ sendMessage
     -- ^ Device to send the message to
     -> Maybe ByteString
     -- ^ JWT Bearer Token
+    -> Maybe ApnPriority
+    -- ^ Priority (Nothing uses default)
     -> JsonAps
     -- ^ The message to send
     -> IO ApnMessageResult
     -- ^ The response from the APN server
-sendMessage s token mJwt payload = catchErrors $
+sendMessage s token mJwt mPriority payload = catchErrors $
     withConnection s $ \c ->
-        sendApnRaw c token mJwt ApnPushTypeAlert message
+        sendApnRaw c token mJwt ApnPushTypeAlert mPriority message
   where message = L.toStrict $ encode payload
 
 -- | Send a silent push notification
+-- Note: This function automatically uses priority 5 as required by APNS spec for background notifications
 sendSilentMessage
     :: ApnSession
     -- ^ Session to use
@@ -740,10 +760,11 @@ sendSilentMessage
     -- ^ The response from the APN server
 sendSilentMessage s token mJwt = catchErrors $
     withConnection s $ \c ->
-        sendApnRaw c token mJwt ApnPushTypeBackground message
+        sendApnRaw c token mJwt ApnPushTypeBackground (Just ApnPriorityPowerEfficient) message
   where message = "{\"aps\":{\"content-available\":1}}"
 
 -- | Send a widget notification
+-- Note: This function omits priority header by default (as per Apple's widget documentation)
 sendWidgetNotification
     :: ApnSession
     -- ^ Session to use
@@ -751,11 +772,13 @@ sendWidgetNotification
     -- ^ Device to send the message to
     -> Maybe ByteString
     -- ^ JWT Bearer Token
+    -> Maybe ApnPriority
+    -- ^ Priority (Nothing omits priority header, following Apple's widget example)
     -> IO ApnMessageResult
     -- ^ The response from the APN server
-sendWidgetNotification s token mJwt = catchErrors $
+sendWidgetNotification s token mJwt mPriority = catchErrors $
     withConnection s $ \c ->
-        sendApnRaw c token mJwt ApnPushTypeWidgets message
+        sendApnRaw c token mJwt ApnPushTypeWidgets mPriority message
   where message = L.toStrict $ encode newWidgetMessage
 
 ensureSessionOpen :: ApnSession -> IO ()
@@ -778,15 +801,18 @@ sendApnRaw
     -- ^ JWT Bearer Token
     -> ApnPushType
     -- ^ Push type (alert, background, widgets)
+    -> Maybe ApnPriority
+    -- ^ Priority (Nothing uses default for push type)
     -> ByteString
     -- ^ The message to send
     -> ClientIO ApnMessageResult
-sendApnRaw connection deviceToken mJwtBearerToken pushType message = bracket_
+sendApnRaw connection deviceToken mJwtBearerToken pushType mPriority message = bracket_
   (lift $ waitQSem (apnConnectionWorkerPool connection))
   (lift $ signalQSem (apnConnectionWorkerPool connection)) $ do
     let aci = apnConnectionInfo connection
-        requestHeaders = maybe (defaultHeaders hostname token1 topic pushType)
-                         (\bearerToken -> (defaultHeaders hostname token1 topic pushType) <> [ ( "authorization", "bearer " <> bearerToken ) ])
+        priority = mPriority <|> (defaultPriorityForPushType pushType)
+        requestHeaders = maybe (defaultHeaders hostname token1 topic pushType priority)
+                         (\bearerToken -> (defaultHeaders hostname token1 topic pushType priority) <> [ ( "authorization", "bearer " <> bearerToken ) ])
                          mJwtBearerToken
         hostname = aciHostname aci
         topic = aciTopic aci
@@ -842,13 +868,15 @@ sendApnRaw connection deviceToken mJwtBearerToken pushType message = bracket_
         getHeaderEx :: HTTP.HeaderName -> [HTTP2.Header] -> ByteString
         getHeaderEx name headers = fromMaybe (throw $ ApnExceptionMissingHeader name) (DL.lookup name headers)
 
-        defaultHeaders :: Text -> ByteString -> ByteString -> ApnPushType -> [(HTTP.HeaderName, ByteString)]
-        defaultHeaders hostname token topic pushType = [ ( ":method", "POST" )
-                                                       , ( ":scheme", "https" )
-                                                       , ( ":authority", TE.encodeUtf8 hostname )
-                                                       , ( ":path", "/3/device/" `S.append` token )
-                                                       , ( "apns-topic", adjustedTopic )
-                                                       , ( "apns-push-type", pushTypeHeader ) ]
+        defaultHeaders :: Text -> ByteString -> ByteString -> ApnPushType -> Maybe ApnPriority -> [(HTTP.HeaderName, ByteString)]
+        defaultHeaders hostname token topic pushType mPriority = 
+            [ ( ":method", "POST" )
+            , ( ":scheme", "https" )
+            , ( ":authority", TE.encodeUtf8 hostname )
+            , ( ":path", "/3/device/" `S.append` token )
+            , ( "apns-topic", adjustedTopic )
+            , ( "apns-push-type", pushTypeHeader )
+            ] <> maybe [] (\p -> [("apns-priority", priorityValue p)]) mPriority
           where
             pushTypeHeader = case pushType of
                 ApnPushTypeAlert -> "alert"
@@ -856,7 +884,12 @@ sendApnRaw connection deviceToken mJwtBearerToken pushType message = bracket_
                 ApnPushTypeWidgets -> "widgets"
             adjustedTopic = case pushType of
                 ApnPushTypeWidgets -> topic `S.append` ".push-type.widgets"
-                _ -> topic
+                ApnPushTypeAlert -> topic
+                ApnPushTypeBackground -> topic
+            priorityValue :: ApnPriority -> ByteString
+            priorityValue ApnPriorityImmediate = "10"
+            priorityValue ApnPriorityPowerEfficient = "5"
+            priorityValue ApnPriorityLow = "1"
 
 
 catchErrors :: ClientIO ApnMessageResult -> IO ApnMessageResult

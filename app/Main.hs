@@ -92,7 +92,7 @@ send o = do
                         sound   = parts !! 1
                         payload = setSound sound . alertMessage title text $ Nothing
                         message = newMessage payload 
-                    in (sendMessage sess token (jwt o) message >>= TI.putStrLn . T.pack . show) >> loop sess
+                    in (sendMessage sess token (jwt o) Nothing message >>= TI.putStrLn . T.pack . show) >> loop sess
                 else case line of
                     "close" -> closeSession sess >> loop sess
                     "reset" -> mkSession >>= loop
@@ -105,4 +105,4 @@ send o = do
             message  = newMessage payload
         forM_ (tokens o) $ \token ->
             let apntoken = hexEncodedToken . T.pack $ token
-            in sendMessage session apntoken (jwt o) message >>= print
+            in sendMessage session apntoken (jwt o) Nothing message >>= print

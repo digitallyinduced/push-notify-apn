@@ -1,3 +1,11 @@
+0.5.0.0
+=======
+
+- Add newWidgetMessage function for creating widget notifications with content-changed flag
+- Add sendWidgetNotification convenience function for sending widget notifications
+- Add ApnPushType enum for specifying push type (currently supports alert, background, and widgets)
+- Add ApnPriority enum for specifying push priority, with defaults based on the push type
+
 0.4.0.3
 =======
 
