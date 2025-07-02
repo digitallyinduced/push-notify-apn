@@ -39,22 +39,30 @@ module Network.PushNotify.APN
     , clearCategory
     , setMutableContent
     , clearMutableContent
+    , setInterruptionLevel
+    , clearInterruptionLevel
     , clearSound
     , addSupplementalField
     , closeSession
     , isConnectionOpen
     , isSessionOpen
     , isOpen
+    , sendWidgetNotification
+    , newWidgetMessage
     , ApnSession
-    , JsonAps
+    , JsonAps(..)
     , JsonApsAlert
     , JsonApsMessage
     , ApnMessageResult(..)
     , ApnFatalError(..)
     , ApnTemporaryError(..)
     , ApnToken(..)
+    , InterruptionLevel(..)
+    , ApnPushType(..)
+    , ApnPriority(..)
     ) where
 
+import           Control.Applicative
 import           Control.Concurrent
 import           Control.Exception.Lifted (Exception, try, bracket_, throw, throwIO)
 import           Control.Monad
@@ -164,6 +172,8 @@ data JsonApsAlert = JsonApsAlert
     -- ^ A short string describing the purpose of the notification.
     , jaaBody  :: !Text
     -- ^ The text of the alert message.
+    , jaaSubtitle :: !(Maybe Text)
+    -- ^ Additional information that explains the purpose of the notification.
     } deriving (Generic, Show)
 
 instance ToJSON JsonApsAlert where
@@ -177,6 +187,58 @@ instance FromJSON JsonApsAlert where
         { fieldLabelModifier = drop 3 . map toLower
         , omitNothingFields  = True
         }
+
+-- | The interruption level (urgency) of the notification.
+data InterruptionLevel = InterruptionLevelPassive
+                      | InterruptionLevelActive
+                      | InterruptionLevelTimeSensitive
+                      | InterruptionLevelCritical
+                      deriving (Enum, Eq, Show, Generic)
+
+instance ToJSON InterruptionLevel where
+    toJSON = String . T.pack . hyphenate . drop 17 . show
+      where
+        hyphenate "TimeSensitive" = "time-sensitive"
+        hyphenate other = map toLower other
+
+instance FromJSON InterruptionLevel where
+    parseJSON = withText "InterruptionLevel" $ \t -> case t of
+        "passive" -> pure InterruptionLevelPassive
+        "active" -> pure InterruptionLevelActive
+        "time-sensitive" -> pure InterruptionLevelTimeSensitive
+        "critical" -> pure InterruptionLevelCritical
+        _ -> fail "Invalid interruption level"
+
+-- | The push type for the notification (for HTTP/2 apns-push-type header).
+data ApnPushType = ApnPushTypeAlert
+                 | ApnPushTypeBackground
+                 | ApnPushTypeWidgets
+                 deriving (Enum, Eq, Show, Generic)
+
+-- | The priority of the notification (for HTTP/2 apns-priority header).
+data ApnPriority = ApnPriorityImmediate    -- ^ 10: Send immediately, triggers alerts/sounds/badges
+                 | ApnPriorityPowerEfficient -- ^ 5: Send based on power considerations, required for background notifications
+                 | ApnPriorityLow          -- ^ 1: Prioritize device power over delivery
+                 deriving (Enum, Eq, Show, Generic)
+
+-- | Get the default priority for a push type according to APNS spec
+-- Returns Nothing for widgets (no priority header should be sent)
+defaultPriorityForPushType :: ApnPushType -> Maybe ApnPriority
+defaultPriorityForPushType ApnPushTypeBackground = Just ApnPriorityPowerEfficient  -- Required by spec
+defaultPriorityForPushType ApnPushTypeAlert = Just ApnPriorityImmediate
+defaultPriorityForPushType ApnPushTypeWidgets = Nothing  -- No priority header for widgets
+
+instance ToJSON ApnPushType where
+    toJSON ApnPushTypeAlert = String "alert"
+    toJSON ApnPushTypeBackground = String "background"  
+    toJSON ApnPushTypeWidgets = String "widgets"
+
+instance FromJSON ApnPushType where
+    parseJSON = withText "ApnPushType" $ \t -> case t of
+        "alert" -> pure ApnPushTypeAlert
+        "background" -> pure ApnPushTypeBackground
+        "widgets" -> pure ApnPushTypeWidgets
+        _ -> fail "Invalid push type"
 
 -- | Push notification message's content
 data JsonApsMessage
@@ -194,11 +256,15 @@ data JsonApsMessage
     -- ^ The category of the notification. Must be registered by the app beforehand.
     , jamMutableContent :: !(Maybe Int)
     -- ^ Whether the message has mutable content.
+    , jamInterruptionLevel :: !(Maybe InterruptionLevel)
+    -- ^ The interruption level of the notification.
+    , jamContentChanged :: !(Maybe Bool)
+    -- ^ Whether the content has changed (for widgets).
     } deriving (Generic, Show)
 
 -- | Create an empty apn message
 emptyMessage :: JsonApsMessage
-emptyMessage = JsonApsMessage Nothing Nothing Nothing Nothing Nothing
+emptyMessage = JsonApsMessage Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 -- | Set a sound for an APN message
 setSound
@@ -254,6 +320,24 @@ clearMutableContent
     -- ^ The modified message
 clearMutableContent a = a { jamMutableContent = Nothing }
 
+-- | Set the interruption level part of an APN message
+setInterruptionLevel
+    :: InterruptionLevel
+    -- ^ The interruption level to set
+    -> JsonApsMessage
+    -- ^ The message to modify
+    -> JsonApsMessage
+    -- ^ The modified message
+setInterruptionLevel i a = a { jamInterruptionLevel = Just i }
+
+-- | Clear the interruption level part of an APN message
+clearInterruptionLevel
+    :: JsonApsMessage
+    -- ^ The message to modify
+    -> JsonApsMessage
+    -- ^ The modified message
+clearInterruptionLevel a = a { jamInterruptionLevel = Nothing }
+
 -- | Set the badge part of an APN message
 setBadge
     :: Int
@@ -278,9 +362,11 @@ alertMessage
     -- ^ The title of the message
     -> Text
     -- ^ The body of the message
+    -> Maybe Text
+    -- ^ The subtitle of the message
     -> JsonApsMessage
     -- ^ The modified message
-alertMessage title text = setAlertMessage title text emptyMessage
+alertMessage title text subtitle = setAlertMessage title text subtitle emptyMessage
 
 -- | Create a new APN message with a body and no title
 bodyMessage
@@ -296,13 +382,15 @@ setAlertMessage
     -- ^ The title of the message
     -> Text
     -- ^ The body of the message
+    -> Maybe Text
+    -- ^ The subtitle of the message
     -> JsonApsMessage
     -- ^ The message to alter
     -> JsonApsMessage
     -- ^ The modified message
-setAlertMessage title text a = a { jamAlert = Just jam }
+setAlertMessage title text subtitle a = a { jamAlert = Just jam }
   where
-    jam = JsonApsAlert (Just title) text
+    jam = JsonApsAlert (Just title) text subtitle
 
 -- | Set the body of an APN message without affecting the title
 setMessageBody
@@ -315,7 +403,7 @@ setMessageBody
 setMessageBody text a = a { jamAlert = Just newJaa }
   where
     newJaa = case jamAlert a of
-                Nothing  -> JsonApsAlert Nothing text
+                Nothing  -> JsonApsAlert Nothing text Nothing
                 Just jaa -> jaa { jaaBody = text }
 
 -- | Remove the alert part of an APN message
@@ -330,6 +418,8 @@ instance ToJSON JsonApsMessage where
     toJSON     = genericToJSON     defaultOptions
         { fieldLabelModifier = \s -> case drop 3 s of
             "MutableContent" -> "mutable-content"
+            "InterruptionLevel" -> "interruption-level"
+            "ContentChanged" -> "content-changed"
             other -> map toLower other
         }
 
@@ -337,6 +427,8 @@ instance FromJSON JsonApsMessage where
     parseJSON = genericParseJSON defaultOptions
         { fieldLabelModifier = \s -> case drop 3 s of
             "mutable-content" -> "MutableContent"
+            "interruption-level" -> "InterruptionLevel"
+            "content-changed" -> "ContentChanged"
             other -> map toLower other
         }
 
@@ -386,6 +478,12 @@ newMessageWithCustomPayload
     -- ^ The resulting APN message
 newMessageWithCustomPayload message payload =
     JsonAps message (Just payload) M.empty
+
+-- | Create a new APN message for widget notifications with content-changed flag
+newWidgetMessage :: JsonAps
+newWidgetMessage = JsonAps widgetMessage Nothing M.empty
+  where
+    widgetMessage = emptyMessage { jamContentChanged = Just True }
 
 -- | Add a supplemental field to be sent over with the notification
 --
@@ -620,13 +718,15 @@ sendRawMessage
     -- ^ Device to send the message to
     -> Maybe ByteString
     -- ^ JWT Bearer Token
+    -> Maybe ApnPriority
+    -- ^ Priority (Nothing uses default)
     -> ByteString
     -- ^ The message to send
     -> IO ApnMessageResult
     -- ^ The response from the APN server
-sendRawMessage s deviceToken mJwtToken payload = catchErrors $
+sendRawMessage s deviceToken mJwtToken mPriority payload = catchErrors $
     withConnection s $ \c ->
-        sendApnRaw c deviceToken mJwtToken payload
+        sendApnRaw c deviceToken mJwtToken ApnPushTypeAlert mPriority payload
 
 -- | Send a push notification message.
 sendMessage
@@ -636,16 +736,19 @@ sendMessage
     -- ^ Device to send the message to
     -> Maybe ByteString
     -- ^ JWT Bearer Token
+    -> Maybe ApnPriority
+    -- ^ Priority (Nothing uses default)
     -> JsonAps
     -- ^ The message to send
     -> IO ApnMessageResult
     -- ^ The response from the APN server
-sendMessage s token mJwt payload = catchErrors $
+sendMessage s token mJwt mPriority payload = catchErrors $
     withConnection s $ \c ->
-        sendApnRaw c token mJwt message
+        sendApnRaw c token mJwt ApnPushTypeAlert mPriority message
   where message = L.toStrict $ encode payload
 
 -- | Send a silent push notification
+-- Note: This function automatically uses priority 5 as required by APNS spec for background notifications
 sendSilentMessage
     :: ApnSession
     -- ^ Session to use
@@ -657,8 +760,26 @@ sendSilentMessage
     -- ^ The response from the APN server
 sendSilentMessage s token mJwt = catchErrors $
     withConnection s $ \c ->
-        sendApnRaw c token mJwt message
+        sendApnRaw c token mJwt ApnPushTypeBackground (Just ApnPriorityPowerEfficient) message
   where message = "{\"aps\":{\"content-available\":1}}"
+
+-- | Send a widget notification
+-- Note: This function omits priority header by default (as per Apple's widget documentation)
+sendWidgetNotification
+    :: ApnSession
+    -- ^ Session to use
+    -> ApnToken
+    -- ^ Device to send the message to
+    -> Maybe ByteString
+    -- ^ JWT Bearer Token
+    -> Maybe ApnPriority
+    -- ^ Priority (Nothing omits priority header, following Apple's widget example)
+    -> IO ApnMessageResult
+    -- ^ The response from the APN server
+sendWidgetNotification s token mJwt mPriority = catchErrors $
+    withConnection s $ \c ->
+        sendApnRaw c token mJwt ApnPushTypeWidgets mPriority message
+  where message = L.toStrict $ encode newWidgetMessage
 
 ensureSessionOpen :: ApnSession -> IO ()
 ensureSessionOpen s = do
@@ -678,15 +799,20 @@ sendApnRaw
     -- ^ Device to send the message to
     -> Maybe ByteString
     -- ^ JWT Bearer Token
+    -> ApnPushType
+    -- ^ Push type (alert, background, widgets)
+    -> Maybe ApnPriority
+    -- ^ Priority (Nothing uses default for push type)
     -> ByteString
     -- ^ The message to send
     -> ClientIO ApnMessageResult
-sendApnRaw connection deviceToken mJwtBearerToken message = bracket_
+sendApnRaw connection deviceToken mJwtBearerToken pushType mPriority message = bracket_
   (lift $ waitQSem (apnConnectionWorkerPool connection))
   (lift $ signalQSem (apnConnectionWorkerPool connection)) $ do
     let aci = apnConnectionInfo connection
-        requestHeaders = maybe (defaultHeaders hostname token1 topic)
-                         (\bearerToken -> (defaultHeaders hostname token1 topic) <> [ ( "authorization", "bearer " <> bearerToken ) ])
+        priority = mPriority <|> (defaultPriorityForPushType pushType)
+        requestHeaders = maybe (defaultHeaders hostname token1 topic pushType priority)
+                         (\bearerToken -> (defaultHeaders hostname token1 topic pushType priority) <> [ ( "authorization", "bearer " <> bearerToken ) ])
                          mJwtBearerToken
         hostname = aciHostname aci
         topic = aciTopic aci
@@ -742,12 +868,28 @@ sendApnRaw connection deviceToken mJwtBearerToken message = bracket_
         getHeaderEx :: HTTP.HeaderName -> [HTTP2.Header] -> ByteString
         getHeaderEx name headers = fromMaybe (throw $ ApnExceptionMissingHeader name) (DL.lookup name headers)
 
-        defaultHeaders :: Text -> ByteString -> ByteString -> [(HTTP.HeaderName, ByteString)]
-        defaultHeaders hostname token topic = [ ( ":method", "POST" )
-                                              , ( ":scheme", "https" )
-                                              , ( ":authority", TE.encodeUtf8 hostname )
-                                              , ( ":path", "/3/device/" `S.append` token )
-                                              , ( "apns-topic", topic ) ]
+        defaultHeaders :: Text -> ByteString -> ByteString -> ApnPushType -> Maybe ApnPriority -> [(HTTP.HeaderName, ByteString)]
+        defaultHeaders hostname token topic pushType mPriority = 
+            [ ( ":method", "POST" )
+            , ( ":scheme", "https" )
+            , ( ":authority", TE.encodeUtf8 hostname )
+            , ( ":path", "/3/device/" `S.append` token )
+            , ( "apns-topic", adjustedTopic )
+            , ( "apns-push-type", pushTypeHeader )
+            ] <> maybe [] (\p -> [("apns-priority", priorityValue p)]) mPriority
+          where
+            pushTypeHeader = case pushType of
+                ApnPushTypeAlert -> "alert"
+                ApnPushTypeBackground -> "background"  
+                ApnPushTypeWidgets -> "widgets"
+            adjustedTopic = case pushType of
+                ApnPushTypeWidgets -> topic `S.append` ".push-type.widgets"
+                ApnPushTypeAlert -> topic
+                ApnPushTypeBackground -> topic
+            priorityValue :: ApnPriority -> ByteString
+            priorityValue ApnPriorityImmediate = "10"
+            priorityValue ApnPriorityPowerEfficient = "5"
+            priorityValue ApnPriorityLow = "1"
 
 
 catchErrors :: ClientIO ApnMessageResult -> IO ApnMessageResult
