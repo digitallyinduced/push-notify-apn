@@ -13,12 +13,6 @@ spec = do
       it "encodes an APNS message with a title and body" $
         toJSON (alertMessage "hello" "world" Nothing) `shouldBe`
           object [
-            "category" .= Null,
-            "sound"    .= Null,
-            "badge"    .= Null,
-            "mutable-content" .= Null,
-            "interruption-level" .= Null,
-            "content-changed" .= Null,
             "alert"    .= object [
               "title" .= String "hello",
               "body"  .= String "world"
@@ -27,27 +21,15 @@ spec = do
       it "encodes an APNS message with a title, subtitle and body" $
         toJSON (alertMessage "hello" "world" (Just "there")) `shouldBe`
           object [
-            "category" .= Null,
-            "sound"    .= Null,
-            "badge"    .= Null,
-            "mutable-content" .= Null,
-            "interruption-level" .= Null,
-            "content-changed" .= Null,
             "alert"    .= object [
               "title" .= String "hello",
               "subtitle" .= String "there",
               "body"  .= String "world"
             ]
           ]
-      it "encodes an APNS message with a title and no body" $
+      it "encodes an APNS message with a body and no title" $
         toJSON (bodyMessage "hello world") `shouldBe`
           object [
-            "category" .= Null,
-            "sound"    .= Null,
-            "badge"    .= Null,
-            "mutable-content" .= Null,
-            "interruption-level" .= Null,
-            "content-changed" .= Null,
             "alert"    .= object [ "body"  .= String "hello world" ]
           ]
 
@@ -55,9 +37,7 @@ spec = do
     context "JSON encoder" $ do
       it "encodes normally when there are no supplemental fields" $
         toJSON (newMessage (alertMessage "hello" "world" Nothing)) `shouldBe` object [
-          "aps"                .= alertMessage "hello" "world" Nothing,
-          "appspecificcontent" .= Null,
-          "data" .= object []
+          "aps" .= alertMessage "hello" "world" Nothing
         ]
 
       it "encodes supplemental fields" $ do
@@ -66,9 +46,8 @@ spec = do
                   & addSupplementalField "aaa" ("qux" :: String)
 
         toJSON msg `shouldBe` object [
-            "aps"                .= alertMessage "hello" "world" Nothing,
-            "appspecificcontent" .= Null,
-            "data"               .= object ["aaa" .= String "qux", "foo" .= String "bar"]
+            "aps"  .= alertMessage "hello" "world" Nothing,
+            "data" .= object ["aaa" .= String "qux", "foo" .= String "bar"]
           ]
 
   describe "ApnFatalError" $
@@ -90,28 +69,14 @@ spec = do
         let (JsonAps widgetMsg _ _) = newWidgetMessage
         in toJSON widgetMsg `shouldBe`
           object [
-            "category" .= Null,
-            "sound"    .= Null,
-            "badge"    .= Null,
-            "mutable-content" .= Null,
-            "interruption-level" .= Null,
-            "content-changed" .= Bool True,
-            "alert"    .= Null
+            "content-changed" .= Bool True
           ]
-      
+
       it "encodes complete widget message" $
         toJSON newWidgetMessage `shouldBe` object [
           "aps" .= object [
-            "category" .= Null,
-            "sound"    .= Null,
-            "badge"    .= Null,
-            "mutable-content" .= Null,
-            "interruption-level" .= Null,
-            "content-changed" .= Bool True,
-            "alert"    .= Null
-          ],
-          "appspecificcontent" .= Null,
-          "data" .= object []
+            "content-changed" .= Bool True
+          ]
         ]
 
   describe "ApnPushType" $ do

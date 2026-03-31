@@ -75,7 +75,7 @@ import           Data.Default                         (def)
 import           Data.Either
 import           Data.IORef
 import           Data.Map.Strict                      (Map)
-import           Data.Maybe
+import           Data.Maybe (catMaybes, fromMaybe, isJust)
 import           Data.Pool
 import           Data.Text                            (Text)
 import           Data.Time.Clock
@@ -421,6 +421,7 @@ instance ToJSON JsonApsMessage where
             "InterruptionLevel" -> "interruption-level"
             "ContentChanged" -> "content-changed"
             other -> map toLower other
+        , omitNothingFields = True
         }
 
 instance FromJSON JsonApsMessage where
@@ -451,12 +452,11 @@ instance FromJSON JsonAps where
         <*> o .:  "data"
 
 instance ToJSON JsonAps where
-    toJSON JsonAps{..} = object (staticFields <> dynamicFields)
-        where
-            dynamicFields = [ "data" .= jaSupplementalFields ]
-            staticFields = [ "aps" .= jaAps
-                           , "appspecificcontent" .= jaAppSpecificContent
-                           ]
+    toJSON JsonAps{..} = object $ catMaybes
+        [ Just ("aps" .= jaAps)
+        , ("appspecificcontent" .=) <$> jaAppSpecificContent
+        , if M.null jaSupplementalFields then Nothing else Just ("data" .= jaSupplementalFields)
+        ]
 
 -- | Prepare a new apn message consisting of a
 -- standard message without a custom payload
